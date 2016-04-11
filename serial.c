@@ -61,6 +61,8 @@ int enable_irq(unsigned irq_nr)
 }
    
 /************ serial ports initialization ***************/
+char *p = "\n\rSerial Port Ready\n\r\007";
+
 int sinit()
 {
   int i;  
@@ -71,7 +73,7 @@ int sinit()
   for (i = 0; i < NR_STTY; i++){
     q = p;
 
-    prints("sinit:"); printi(i);
+		printf("sinit : port #%d\n",i);
 
       t = &stty[i];
 
@@ -123,7 +125,7 @@ int sinit()
     enable_irq(4-i);  // COM1: IRQ4; COM2: IRQ3
 
     /* show greeting message */
-    USE bputc() to PRINT MESSAGE ON THE SERIAL PORT: serial port # ready
+    //USE bputc() to PRINT MESSAGE ON THE SERIAL PORT: serial port # ready
   }
 }  
          
@@ -151,6 +153,9 @@ int shandler(int port)
    out_byte(INT_CTL, ENABLE);   /* reenable the 8259 controller */ 
 }
 
+int s0handler(){ shandler(0);}
+int s1handler(){ shandler(1);}
+
 int do_errors()
 { printf("ignore error\n"); }
 
@@ -159,8 +164,7 @@ int do_modem()
 
 
 /* The following show how to enable and disable Tx interrupts */
-
-en_tx(struct stty *t)
+enable_tx(struct stty *t)
 {
   lock();
   out_byte(t->port+IER, 0x03);   /* 0011 ==> both tx and rx on */
@@ -177,57 +181,74 @@ disable_tx(struct stty *t)
 }
 
 // ============= Input Driver ==========================
-int do_rx(struct stty *t)
-{ 
-  int c;
-  c = in_byte(tty->port) & 0x7F;  /* read the char from port */
-
-  printf("\nrx interrupt c="); putc(c);
-
-  use bputc() to ECHO the input char to serial port 
-
-  // COMPLETE with YOUR C code
-}      
+int do_rx(struct stty *tty)
+{
+	char c = in_byte(tty->port);       // get char from data register
+	
+	if (tty->inchars.value >= BUFLEN)  // if inbuf is full
+	{ 
+		out_byte(tty, BEEP);            // sound BEEP=0x7
+		return;
+ 	}
+ 	if (c==0x3)                        // Control_C key
+ 	{
+ 		// send SIGINT(2) signal to processes;
+ 		
+ 		c = '\n';                       // force a line
+ 	}
+ 	
+ 	tty->inbuf[tty->inhead++] = c;     // put char into inbuf
+ 	tty->inhead %= BUFLEN;             // advance inhead
+ 	V(&tty->inchars);                  // inc inchars and unblock sgetc()
+ }    
 
 //----------- UPPER half functions ------------------------     
 int sgetc(struct stty *tty) 
 { 
-    WAIT FOR input char;
+    //WAIT FOR input char;
 
-    get a char c from inbuf[ ]
+    //get a char c from inbuf[ ]
  
-    return char;
+    //return char;
 }
 
 
 int sgetline(struct stty *tty, char *line)
 {
   // WRITE C code to get a line from a serial port tty
+  return strlen(line);
 }
 
 //****************** Output driver *****************************
-int do_tx(struct stty *t)
+int do_tx(struct stty *tty)
 {
-   printf("tx interrupt\n");
-
-   if outbuf empty { 
-      turn off tx interrupt; 
-      return;
-   }
-
-   // output a char from outbuf[ ]; 
-   // V outspace semaphore
-
+	char c;
+	/*if (!outbuf[tty->outtail]) /*no more chars in outbuf[]* // no more outputs
+	{
+		//turn_off Tx interrupt;
+		return;
+ 	}*/
+ 	
+ 	c = tty->outbuf[tty->outtail++]; // output next char
+ 	tty->outtail %= BUFLEN;
+ 	out_byte(tty->port, c);
+ 	
+ 	V(&tty->outspace);
 }
 
 //--------------- UPPER half functions -------------------
 int sputc(struct stty *tty, char c)
 {
-    WAIT FOR space in tty's outbuf[];
-
-    enter c into tty's outbuf[ ];
-
-    enable tx interrupt if it is off;    
+	P(&tty->outspace); // wait for space in outbuf[]
+ 	lock(); // disalble interrupts
+ 	
+ 	tty->outbuf[tty->outhead++] = c;
+ 	tty->outhead %= BUFLEN;
+ 	
+ 	if (!tty->tx_on)
+ 		enable_tx(tty); // trun on tty’s tx interrupt;
+ 	
+ 	unlock(); // enable interrupts
 }
 
 int sputline(struct stty *tty, char *line)

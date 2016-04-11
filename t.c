@@ -82,6 +82,8 @@ int scheduler()
 int tinth(); // declare timerInteruptHandler as a function 
 int int80h();
 int kbinth();
+int s0inth();
+int s1inth();
 
 int set_vector(u16 vector , u16 handler)
 {
@@ -110,6 +112,10 @@ main()
     vid_init();
     init();      // initialize and create P0 as running
     set_vector(80, int80h);
+    
+    // Set interrupt vectors for COM1 (IRQ4) and COM2 (IRQ3) by
+ 	set_vector(12, s0inth); // vector 12 for COM1
+	set_vector(11, s1inth); // vector 11 for COM2 
    
    kfork("/bin/u1");     // P0 kfork() P1
 	//kfork("/bin/u1");     // P0 kfork() P2
