@@ -3,6 +3,9 @@
 #define INT_CTL     0x20
 #define ENABLE      0x20
 
+#define INBUFLEN    80
+#define OUTBUFLEN   80
+#define EBUFLEN     10
 #define NULLCHAR      0
 #define BEEP          7
 #define BACKSPACE     8
@@ -30,13 +33,17 @@ struct stty {
    /* input buffer */
    char inbuf[BUFLEN];
    int inhead, intail;
-   struct semaphore inchars;
+   struct semaphore inchars, inmutex;
 
    /* output buffer */
    char outbuf[BUFLEN];
    int outhead, outtail;
-   struct semaphore outspace;
+   struct semaphore outspace, outmutex;
    int tx_on;
+   
+   /* echo buffer */
+   char ebuf[EBUFLEN];
+   int ehead, etail, e_count;
 
    /* Control section */
    char echo;   /* echo inputs */
@@ -197,91 +204,135 @@ disable_tx(struct stty *t)
   unlock();
 }
 
+int secho(struct stty *tty, int c)
+{
+   /* insert c into ebuf[]; turn on tx interrupt */
+   tty->ebuf[tty->ehead++] = c;
+   tty->ehead %= EBUFLEN;
+   tty->e_count++;
+   if (!tty->tx_on)
+        enable_tx(tty);     /* tx handler will flush them out */
+}
+
 // ============= Input Driver ==========================
 int do_rx(struct stty *tty)
 {
-	char c = in_byte(tty->port);       // get char from data register
-	
-	if (tty->inchars.value >= BUFLEN)  // if inbuf is full
-	{ 
-		out_byte(tty, BEEP);            // sound BEEP=0x7
-		return;
- 	}
- 	if (c==0x3)                        // Control_C key
- 	{
- 		// send SIGINT(2) signal to processes;
- 		
- 		c = '\n';                       // force a line
- 	}
- 	
- 	tty->inbuf[tty->inhead++] = c;     // put char into inbuf
- 	tty->inhead %= BUFLEN;             // advance inhead
- 	V(&tty->inchars);                  // inc inchars and unblock sgetc()
- }    
+	int c;
+  c = in_byte(tty->port) & 0x7F;  /* read the ASCII char from port */
 
-//----------- UPPER half functions ------------------------     
-int sgetc(struct stty *tty) 
-{ 
-	char c;
-	
-	P(&tty->inchars); // wait if no input char yet
-	lock(); // disable interrupts
- 	
- 	c = tty->inbuf[tty->intail++];
- 	tty->intail %= BUFLEN;
- 	
- 	unlock(); // enable interrupts
- 	return c;
+  printf("port %x interrupt:c=%c ", tty->port, c,c);
+  printf("rx:c=%c ", c);
+
+  // cook \b 
+  if (c==BACKSPACE){
+      secho(tty, '\b'); secho(tty,' '); secho(tty,'\b');
+      if (tty->inchars.value > 0){
+          tty->inchars.value--;
+          tty->inhead--;
+          tty->inhead %= INBUFLEN;
+      }
+      return;
+  }
+  if (tty->inchars.value >= INBUFLEN){
+      secho(tty, BEEP);
+      return;
+  }
+
+  secho(tty, c);
+
+  if (c == '\r'){
+       c = '\n';                   /* change CR to LF */
+       secho(tty,c);
+       putc(c);
+       printf("rx: has a line ");
+  }
+  tty->inbuf[tty->inhead++] = c;   /* put char into inbuf[] */
+  tty->inhead %= INBUFLEN;         /* advance inhead */
+
+  V(&tty->inchars);          /* inc inchars and wakeup sgetc() */
 }
 
 
+int sgetc(struct stty *tty)
+{ 
+  int c;
+  P(&tty->inchars);   /* wait if no input char yet */
+    lock();             /* disable interrupts */
+      c = tty->inbuf[tty->intail++];
+      tty->intail %= INBUFLEN;
+    unlock();
+    //printf("sgetc : c=%x\n", c);
+  return(c);
+}
+
 int sgetline(struct stty *tty, char *line)
 {
-  // WRITE C code to get a line from a serial port tty
-  return strlen(line);
+   printf("sgetline ");
+
+   P(&tty->inmutex);       /* one process at a time */
+   
+   while ( (*line = sgetc(tty)) != '\n')
+   {
+   	line++;
+   }
+   *line = 0;
+   V(&tty->inmutex);
+
+   return strlen(line);
 }
 
 //****************** Output driver *****************************
 int do_tx(struct stty *tty)
 {
-	char c;
-	/*if (!outbuf[tty->outtail]) /*no more chars in outbuf[]* // no more outputs
-	{
-		//turn_off Tx interrupt;
-		return;
- 	}*/
- 	
- 	c = tty->outbuf[tty->outtail++]; // output next char
- 	tty->outtail %= BUFLEN;
- 	out_byte(tty->port, c);
- 	
- 	V(&tty->outspace);
+	int c;
+  //  printf("tx interrupt ");
+  if (tty->e_count == 0 && tty->outspace.value == OUTBUFLEN){ // nothing to do 
+    disable_tx(tty);                // turn off tx interrupt
+      return;
+  }
+
+  if (tty->e_count) {                 // there are chars to echo
+        c = tty->ebuf[tty->etail++];  tty->etail %= EBUFLEN;
+        tty->e_count--;
+        out_byte(tty->port, c);       // write the char out
+        return;                       // that's all for now
+  } 
+
+  if (tty->outspace.value < OUTBUFLEN){ // has something to output
+        c = tty->outbuf[tty->outtail++];
+        tty->outtail %= OUTBUFLEN;
+        out_byte(tty->port, c);
+        if (c=='\n')
+	    printf("tx: done with a line\n");
+        V(&tty->outspace);
+        return;
+  }
 }
 
 //--------------- UPPER half functions -------------------
 int sputc(struct stty *tty, char c)
 {
-	P(&tty->outspace); // wait for space in outbuf[]
- 	lock(); // disalble interrupts
- 	
- 	tty->outbuf[tty->outhead++] = c;
- 	tty->outhead %= BUFLEN;
- 	
- 	if (!tty->tx_on)
- 		enable_tx(tty); // trun on tty’s tx interrupt;
- 	
- 	unlock(); // enable interrupts
+	P(&tty->outspace);     /* wait for room in outbuf[] */  
+   lock();               /* disalble interrupts */
+   tty->outbuf[tty->outhead++] = c;
+   tty->outhead %= OUTBUFLEN;
+   unlock();
+
+   if (!tty->tx_on)  /* enable tx interrupt if not on */      
+   	enable_tx(tty);
+   
+   return(1);
 }
 
 int sputline(struct stty *tty, char *line)
-{
-	
-  // WRITE C code to output a line to a serial port
-  while(*line)
-  {
-  		sputc(tty, *line);
+{	
+   P(&tty->outmutex);                  // one process at a time
+	while (*line)
+	{
+		sputc(tty, *line);
   		line++;
-  }
+   }
+   V(&tty->outmutex);
 }
 
 
@@ -289,8 +340,17 @@ int sputline(struct stty *tty, char *line)
 //**************** Syscalls from Umdoe ************************
 int usgets(int port, char *y)
 {  
-  // get a line from serial port and write it to y in U space
-  
+	int c, n;
+   struct stty *tty = &stty[0];      /* Our only serial terminal */
+   n = 0;      
+	
+	while ( (c = sgetc()) != '\n')
+	{
+   	put_byte(c,running->uss, y);
+      n++; y++;
+   }
+   put_byte(0, running->uss, y);
+   return(n);
 }
 
 int uputs(int port, char *y)
