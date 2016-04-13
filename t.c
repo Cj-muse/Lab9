@@ -116,6 +116,7 @@ main()
     // Set interrupt vectors for COM1 (IRQ4) and COM2 (IRQ3) by
  	set_vector(12, s0inth); // vector 12 for COM1
 	set_vector(11, s1inth); // vector 11 for COM2 
+   sinit();
    
    kfork("/bin/u1");     // P0 kfork() P1
 	//kfork("/bin/u1");     // P0 kfork() P2
@@ -123,13 +124,13 @@ main()
 	//kfork("/bin/u1");     // P0 kfork() P4	*/
 
    // install KBD interrupt handler, initilize kbd driver
-   set_vector(9, kbinth); 
-   kbd_init();
+   //set_vector(9, kbinth); 
+   //kbd_init();
 
 	lock();
 	setRuntime();
-	set_vector(8, tinth); // install address of tinth() to vector 8 
-	timer_init();
+	//set_vector(8, tinth); // install address of tinth() to vector 8 
+	//timer_init();
 	
 	//ktest();
     while(1){

@@ -55,6 +55,13 @@ int bputc(int port, int c)
     out_byte(port+DATA, c);
 }
 
+int bgetc(int port)
+{
+	//still having trouble understanding 
+   while ((in_byte(port+LSR) & 0x01) == 0); 
+   return (in_byte(port+DATA) & 0x7F);
+}
+
 int enable_irq(unsigned irq_nr)
 {
    out_byte(0x21, in_byte(0x21) & ~(1 << irq_nr));
@@ -126,6 +133,11 @@ int sinit()
 
     /* show greeting message */
     //USE bputc() to PRINT MESSAGE ON THE SERIAL PORT: serial port # ready
+		while (*q)
+		{
+      	bputc(t->port, *q);
+      	q++;
+    	}
   }
 }  
          
@@ -136,7 +148,8 @@ int shandler(int port)
 {  
    struct stty *t;
    int IntID, LineStatus, ModemStatus, intType, c;
-
+   
+   printf("in shandler\n");
    t = &stty[port];            /* IRQ 4 interrupt : COM1 = stty[0] */
 
    IntID     = in_byte(t->port+IIR);       /* read InterruptID Reg */
@@ -144,13 +157,17 @@ int shandler(int port)
    ModemStatus=in_byte(t->port+MSR);       /* read ModemStatus Reg */
 
    intType = IntID & 7;     /* mask out all except the lowest 3 bits */
+   //printf("intType = %d \n", intType);
+   
    switch(intType){
       case 6 : do_errors(t);  break;   /* 110 = errors */
       case 4 : do_rx(t);      break;   /* 100 = rx interrupt */
       case 2 : do_tx(t);      break;   /* 010 = tx interrupt */
       case 0 : do_modem(t);   break;   /* 000 = modem interrupt */
    }
+   
    out_byte(INT_CTL, ENABLE);   /* reenable the 8259 controller */ 
+   printf("leaving shandler\n");
 }
 
 int s0handler(){ shandler(0);}
@@ -205,11 +222,16 @@ int do_rx(struct stty *tty)
 //----------- UPPER half functions ------------------------     
 int sgetc(struct stty *tty) 
 { 
-    //WAIT FOR input char;
-
-    //get a char c from inbuf[ ]
- 
-    //return char;
+	char c;
+	
+	P(&tty->inchars); // wait if no input char yet
+	lock(); // disable interrupts
+ 	
+ 	c = tty->inbuf[tty->intail++];
+ 	tty->intail %= BUFLEN;
+ 	
+ 	unlock(); // enable interrupts
+ 	return c;
 }
 
 
@@ -253,7 +275,13 @@ int sputc(struct stty *tty, char c)
 
 int sputline(struct stty *tty, char *line)
 {
+	
   // WRITE C code to output a line to a serial port
+  while(*line)
+  {
+  		sputc(tty, *line);
+  		line++;
+  }
 }
 
 
@@ -262,6 +290,7 @@ int sputline(struct stty *tty, char *line)
 int usgets(int port, char *y)
 {  
   // get a line from serial port and write it to y in U space
+  
 }
 
 int uputs(int port, char *y)
